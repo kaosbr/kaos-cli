@@ -34,11 +34,18 @@ class SessionManager:
         self._init_db()
 
     def _init_db(self):
+        """
+        Inicializa o banco de dados SQLite para armazenar o histórico de mensagens.
+        Cria a tabela 'messages' se ela não existir.
+        """
         sqlite3 = get_sqlite3()
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                # OTIMIZAÇÃO: Modo WAL para performance e concorrência
+                # OTIMIZAÇÃO: O modo WAL (Write-Ahead Logging) melhora significativamente a performance
+                # de leitura e escrita e permite maior concorrência, o que é útil caso o banco seja
+                # acessado por múltiplos processos simultaneamente.
+                # PRAGMA synchronous=NORMAL reduz o número de sincronizações de disco, aumentando a velocidade.
                 cursor.execute('PRAGMA journal_mode=WAL')
                 cursor.execute('PRAGMA synchronous=NORMAL')
                 cursor.execute('''
@@ -87,20 +94,36 @@ class AppConfig:
         self.provider = provider; self.key = key; self.host = host; self.model = model; self.system = system; self.auto_context = auto_context
 
 def load_config() -> AppConfig:
+    """
+    Carrega as configurações do aplicativo.
+
+    A ordem de precedência é:
+    1. Variáveis de ambiente do sistema.
+    2. Arquivo 'config.env' no diretório atual (Path.cwd()).
+    3. Arquivo 'config.env' no diretório de usuário (~/.config/kaos-cli/).
+    4. Valores padrão definidos no código.
+    """
     m = {}
+    # Lê os arquivos de configuração na ordem, o arquivo local sobrescreve o do usuário.
     for c in [Path.home() / ".config/kaos-cli/config.env", Path.cwd() / "config.env"]:
         if c.is_file():
             try:
                 for l in c.read_text().splitlines():
+                    # Ignora linhas comentadas ou que não contenham '='
                     if "=" in l and not l.startswith("#"):
                         k, v = l.split("=", 1); m[k.strip()] = v.strip().strip("'\"")
             except: pass
+
+    # Tenta obter das variáveis de ambiente. Se não encontrar, tenta do dicionário lido dos arquivos,
+    # e por último usa o valor padrão.
     prov = os.environ.get("KAOS_PROVIDER", m.get("KAOS_PROVIDER", "ollama")).lower()
     key = os.environ.get("GOOGLE_API_KEY", m.get("GOOGLE_API_KEY", ""))
     host = os.environ.get("OLLAMA_HOST", m.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
     model = os.environ.get("KAOS_MODEL", m.get("KAOS_MODEL", "qwen2.5-coder:latest"))
     sys_prompt = os.environ.get("KAOS_SYSTEM_PROMPT", m.get("KAOS_SYSTEM_PROMPT", "Você é o KAOS CLI, especialista sênior em engenharia."))
     auto_context = os.environ.get("KAOS_AUTO_CONTEXT", m.get("KAOS_AUTO_CONTEXT", "1")) == "1"
+
+    # Faz fallback para 'ollama' se o provider selecionado for 'gemini' mas a chave da API (key) estiver faltando.
     return AppConfig(prov if (prov == "gemini" and key) else "ollama", key, host, model, sys_prompt, auto_context)
 
 # --- CLIENTES API ---
@@ -116,6 +139,9 @@ class GeminiClient:
         return self._do_stream(req, is_gemini=True)
         
     def _do_stream(self, req, is_gemini):
+        """
+        Executa a requisição HTTP em modo stream e processa os dados retornados em tempo real (Server-Sent Events).
+        """
         json = get_json(); request, error = get_urllib(); ans = []
         try:
             with request.urlopen(req, timeout=60) as resp:
@@ -123,14 +149,18 @@ class GeminiClient:
                     l = line.decode(errors="replace").strip()
                     if not l: continue
                     chunk = ""
+                    # No caso da API Gemini usando SSE (Server-Sent Events), os dados vêm prefixados com 'data: '
                     if is_gemini and l.startswith("data: "):
                         try:
+                            # Extrai o JSON ignorando os 6 primeiros caracteres correspondentes a 'data: '
                             data = json.loads(l[6:])
                             chunk = data["candidates"][0]["content"]["parts"][0]["text"]
                         except: continue
                     if chunk:
-                        ans.append(chunk); sys.stdout.write(chunk); sys.stdout.flush()
-            print()
+                        ans.append(chunk)
+                        # Exibe o chunk assim que chega para garantir feedback imediato ao usuário no terminal
+                        sys.stdout.write(chunk); sys.stdout.flush()
+            print() # Imprime uma nova linha ao final do stream
         except error.URLError as e:
             print_color(f"\n[!] Erro de Conexão: Verifique sua internet ou chave API. ({e.reason})", Colors.F, file=sys.stderr)
         except Exception as e:
@@ -148,35 +178,51 @@ class OllamaClient:
         except: return []
 
     def resolve_model(self, requested: str) -> str:
+        """
+        Verifica se o modelo solicitado está disponível localmente no Ollama e implementa uma lógica de fallback.
+        """
         models = self.check_models()
         if not models:
             print_color(f"[!] Erro: Nao foi possivel conectar ao Ollama em {self.host}", Colors.F, file=sys.stderr)
             return requested
+
+        # Caso o modelo pedido não seja encontrado perfeitamente (e.g. qwen2.5-coder vs qwen2.5-coder:latest)
         if requested not in models:
-            # Fallback inteligente
+            # Fallback inteligente: tenta procurar por correspondência apenas pelo nome do modelo (ignorando a tag após o ':')
             for m in models:
                 if requested.split(':')[0] in m: return m
+            # Se não encontrar nada correspondente, escolhe o primeiro modelo disponível como fallback e avisa o usuário.
             print_color(f"[!] Modelo '{requested}' nao encontrado. Usando: {models[0]}", Colors.D, file=sys.stderr)
             return models[0]
         return requested
 
     def chat_stream(self, model: str, msgs: list) -> str:
+        """
+        Envia mensagens para a API de chat do Ollama usando stream, para exibir a resposta de forma progressiva.
+        """
         json = get_json(); request, error = get_urllib()
+        # keep_alive de 30m garante que o modelo fica carregado em memória após a requisição.
+        # num_ctx: 8192 configura o tamanho do contexto de entrada/saída esperado.
         p = {"model": model, "messages": list(msgs), "stream": True, "keep_alive": "30m", "options": {"num_ctx": 8192}}
         req = request.Request(f"{self.host}/api/chat", data=json.dumps(p).encode(), headers={"Content-Type": "application/json"})
         ans = []
         try:
             with request.urlopen(req, timeout=120) as resp:
+                # Lê o fluxo da resposta linha por linha, decodificando e parseando cada pedaço (chunk) JSON recebido.
                 while True:
                     line = resp.readline()
                     if not line: break
                     try:
                         data = json.loads(line.decode(errors="replace"))
                         chunk = data.get("message", {}).get("content", "")
-                        if chunk: ans.append(chunk); sys.stdout.write(chunk); sys.stdout.flush()
+                        if chunk:
+                            ans.append(chunk)
+                            # Imprime os caracteres ao vivo para a experiência do usuário.
+                            sys.stdout.write(chunk); sys.stdout.flush()
+                        # A flag "done" indica o fim do stream pela API do Ollama.
                         if data.get("done"): break
                     except: continue
-            print()
+            print() # Imprime nova linha após o fluxo terminar.
         except error.URLError as e:
             print_color(f"\n[!] Erro Ollama: O servidor esta rodando? ({e.reason})", Colors.F, file=sys.stderr)
             print_color(f"Dica: Execute 'ollama serve' ou verifique OLLAMA_HOST={self.host}", Colors.D, file=sys.stderr)
@@ -185,10 +231,14 @@ class OllamaClient:
         return "".join(ans).strip()
 
 def build_project_context(dir_path: str) -> str:
+    """
+    Constrói um contexto de texto representando o projeto, lendo os arquivos e os adicionando como parte do prompt.
+    Isto permite que o modelo analise o repositório em buscas de bugs ou faça revisões de código.
+    """
     path = Path(dir_path).resolve(); fnmatch = get_fnmatch()
     if not path.is_dir(): return ""
     
-    # Suporte robusto a .gitignore
+    # Suporte robusto a .gitignore: inicia com uma lista de pastas padrão que usualmente não devem ser analisadas
     ignore_patterns = {'.git', 'node_modules', '__pycache__', 'venv', 'dist', 'build', '.kaos_memory.json', '.DS_Store'}
     git_ignore = path / ".gitignore"
     if git_ignore.exists():
@@ -196,29 +246,33 @@ def build_project_context(dir_path: str) -> str:
             for l in git_ignore.read_text().splitlines():
                 l = l.strip()
                 if l and not l.startswith("#"):
-                    # Normaliza padrões simples de gitignore para fnmatch
+                    # Normaliza padrões simples de gitignore para o formato suportado pelo fnmatch
                     p = l.rstrip('/')
                     if p.startswith('/'): p = p[1:]
                     ignore_patterns.add(p)
+                    # Exemplo: Se há "node_modules", adicionamos "node_modules/*" para garantir que seu conteúdo será ignorado
                     if not l.endswith('/'): ignore_patterns.add(p + '/*')
         except: pass
 
     context_parts = [f"Project structure of {path.name}:"]
     processed_files = 0; max_files = 40
     
+    # Primeiro passe: Mapeia apenas a estrutura de diretórios para fornecer um mapa geral pro modelo
     for root, dirs, files in os.walk(path):
         rel_root = os.path.relpath(root, path)
         
-        # Poda de diretórios ignorados
+        # Poda de diretórios ignorados para economizar processamento do os.walk
         if rel_root != ".":
             should_ignore_dir = False
             for p in ignore_patterns:
                 if fnmatch.fnmatch(rel_root, p) or rel_root.startswith(p.rstrip('/*')):
                     should_ignore_dir = True; break
+            # Se a pasta for ignorada, nós a limpamos de 'dirs' e evitamos entrar nos seus subdiretórios.
             if should_ignore_dir: dirs[:] = []; continue
         
         dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ignore_patterns]
         level = 0 if rel_root == "." else rel_root.count(os.sep) + 1
+        # Limita a profundidade da varredura a 3 níveis para evitar estourar o contexto e acelerar a construção
         if level > 3: continue
         
         context_parts.append('    ' * level + os.path.basename(root) + '/')
@@ -226,7 +280,10 @@ def build_project_context(dir_path: str) -> str:
             if f.startswith('.') or f in ignore_patterns: continue
             context_parts.append('    ' * (level + 1) + f)
             
+    # Arquivos importantes de configuração e manifesto ganham prioridade
     important = {'README.md', 'package.json', 'requirements.txt', 'config.env', 'Dockerfile', 'Makefile', 'setup.py', 'go.mod'}
+
+    # Segundo passe: Lê o conteúdo dos arquivos permitidos para incluí-los no contexto a ser enviado ao modelo.
     for root, _, files in os.walk(path):
         rel_root = os.path.relpath(root, path)
         should_ignore = False
@@ -236,11 +293,16 @@ def build_project_context(dir_path: str) -> str:
         if should_ignore: continue
         
         for f in sorted(files):
+            # Limite máximo de arquivos processados para evitar que o prompt exceda os limites da API de LLM (num_ctx)
             if processed_files >= max_files: break
+
+            # Apenas arquivos importantes ou extensões específicas de código que contêm informações cruciais
             if (f in important or f.endswith(('.py', '.sh', '.js', '.ts', '.rs', '.go', '.sql', '.md'))) and f not in ignore_patterns:
                 filepath = Path(root) / f
                 try:
                     size = filepath.stat().st_size
+                    # Ignora arquivos vazios e também limita o tamanho máximo de um arquivo individual a ~15KB.
+                    # Isso garante que um único arquivo gigante não afogue os outros na janela de contexto do LLM.
                     if 0 < size < 15000:
                         context_parts.append(f"\n--- FILE: {os.path.relpath(filepath, path)} ---\n{filepath.read_text(errors='replace')}\n")
                         processed_files += 1
