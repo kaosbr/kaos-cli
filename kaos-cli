@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# --- METADADOS ---
+APP_NAME, VERSION = "kaos-cli", "8.1.2-stable"
+DEFAULT_HOST, DEFAULT_MODEL = "http://127.0.0.1:11434", "qwen2.5-coder:latest"
+
+class Colors:
+    H, B, C, G, W, F, E, BD, D = '\033[95m', '\033[94m', '\033[96m', '\033[92m', '\033[93m', '\033[91m', '\033[0m', '\033[1m', '\033[2m'
+
+def print_color(t, c, end="\n", flush=False, file=sys.stdout):
+    file.write(f"{c}{t}{Colors.E}{end}")
+    if flush: file.flush()
+
+# --- LAZY IMPORTS ---
+def get_json(): import json; return json
+def get_urllib(): import urllib.request as request, urllib.error as error; return request, error
+def get_sqlite3(): import sqlite3; return sqlite3
+def get_argparse(): import argparse; return argparse
+def get_fnmatch(): import fnmatch; return fnmatch
+
+# --- DATABASE MANAGER (SESSIONS) ---
+class SessionManager:
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            db_dir = Path.home() / ".local" / "share" / "kaos-cli"
+            db_dir.mkdir(parents=True, exist_ok=True)
+            db_path = db_dir / "sessions.db"
+        self.db_path = str(db_path)
+        self._init_db()
+
+    def _init_db(self):
+        sqlite3 = get_sqlite3()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # OTIMIZAÇÃO: Modo WAL para performance e concorrência
+                cursor.execute('PRAGMA journal_mode=WAL')
+                cursor.execute('PRAGMA synchronous=NORMAL')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_name TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                conn.commit()
+        except Exception as e:
+            print_color(f"[!] Erro DB: {e}", Colors.F, file=sys.stderr)
+
+    def add_message(self, session_name: str, role: str, content: str):
+        sqlite3 = get_sqlite3()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO messages (session_name, role, content) VALUES (?, ?, ?)", (session_name, role, content))
+                conn.commit()
+        except: pass
+
+    def get_messages(self, session_name: str):
+        sqlite3 = get_sqlite3()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT role, content FROM messages WHERE session_name = ? ORDER BY id ASC", (session_name,))
+                return [{"role": row[0], "content": row[1]} for row in cursor.fetchall()]
+        except: return []
+
+    def clear_session(self, session_name: str):
+        sqlite3 = get_sqlite3()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM messages WHERE session_name = ?", (session_name,))
+                conn.commit()
+        except: pass
+
+# --- CONFIGURAÇÃO ---
+class AppConfig:
+    def __init__(self, provider: str, key: str, host: str, model: str, system: str, auto_context: bool):
+        self.provider = provider; self.key = key; self.host = host; self.model = model; self.system = system; self.auto_context = auto_context
+
+def load_config() -> AppConfig:
+    m = {}
+    for c in [Path.home() / ".config/kaos-cli/config.env", Path.cwd() / "config.env"]:
+        if c.is_file():
+            try:
+                for l in c.read_text().splitlines():
+                    if "=" in l and not l.startswith("#"):
+                        k, v = l.split("=", 1); m[k.strip()] = v.strip().strip("'\"")
+            except: pass
+    prov = os.environ.get("KAOS_PROVIDER", m.get("KAOS_PROVIDER", "ollama")).lower()
+    key = os.environ.get("GOOGLE_API_KEY", m.get("GOOGLE_API_KEY", ""))
+    host = os.environ.get("OLLAMA_HOST", m.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
+    model = os.environ.get("KAOS_MODEL", m.get("KAOS_MODEL", "qwen2.5-coder:latest"))
+    sys_prompt = os.environ.get("KAOS_SYSTEM_PROMPT", m.get("KAOS_SYSTEM_PROMPT", "Você é o KAOS CLI, especialista sênior em engenharia."))
+    auto_context = os.environ.get("KAOS_AUTO_CONTEXT", m.get("KAOS_AUTO_CONTEXT", "1")) == "1"
+    return AppConfig(prov if (prov == "gemini" and key) else "ollama", key, host, model, sys_prompt, auto_context)
+
+# --- CLIENTES API ---
+class GeminiClient:
+    def __init__(self, key: str): self.key = key
+    def check_models(self) -> list[str]: return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+    def resolve_model(self, requested: str) -> str: return requested
+    def chat_stream(self, model: str, msgs: list) -> str:
+        json = get_json(); request, error = get_urllib()
+        cs = [{"role": "user" if msg["role"] in {"user", "system"} else "model", "parts": [{"text": msg["content"]}]} for msg in msgs]
+        p = {"contents": cs, "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.2}}
+        req = request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={self.key}", data=json.dumps(p).encode(), headers={"Content-Type": "application/json"})
+        return self._do_stream(req, is_gemini=True)
+        
+    def _do_stream(self, req, is_gemini):
+        json = get_json(); request, error = get_urllib(); ans = []
+        try:
+            with request.urlopen(req, timeout=60) as resp:
+                for line in resp:
+                    l = line.decode(errors="replace").strip()
+                    if not l: continue
+                    chunk = ""
+                    if is_gemini and l.startswith("data: "):
+                        try:
+                            data = json.loads(l[6:])
+                            chunk = data["candidates"][0]["content"]["parts"][0]["text"]
+                        except: continue
+                    if chunk:
+                        ans.append(chunk); sys.stdout.write(chunk); sys.stdout.flush()
+            print()
+        except error.URLError as e:
+            print_color(f"\n[!] Erro de Conexão: Verifique sua internet ou chave API. ({e.reason})", Colors.F, file=sys.stderr)
+        except Exception as e:
+            print_color(f"\n[!] Erro API: {e}", Colors.F, file=sys.stderr)
+        return "".join(ans).strip()
+
+class OllamaClient:
+    def __init__(self, host: str): self.host = host.rstrip("/")
+    def check_models(self) -> list[str]:
+        request, _ = get_urllib(); json = get_json()
+        try:
+            req = request.Request(f"{self.host}/api/tags")
+            with request.urlopen(req, timeout=3) as r:
+                return [m["name"] for m in json.loads(r.read()).get("models", [])]
+        except: return []
+
+    def resolve_model(self, requested: str) -> str:
+        models = self.check_models()
+        if not models:
+            print_color(f"[!] Erro: Nao foi possivel conectar ao Ollama em {self.host}", Colors.F, file=sys.stderr)
+            return requested
+        if requested not in models:
+            # Fallback inteligente
+            for m in models:
+                if requested.split(':')[0] in m: return m
+            print_color(f"[!] Modelo '{requested}' nao encontrado. Usando: {models[0]}", Colors.D, file=sys.stderr)
+            return models[0]
+        return requested
+
+    def chat_stream(self, model: str, msgs: list) -> str:
+        json = get_json(); request, error = get_urllib()
+        p = {"model": model, "messages": list(msgs), "stream": True, "keep_alive": "30m", "options": {"num_ctx": 8192}}
+        req = request.Request(f"{self.host}/api/chat", data=json.dumps(p).encode(), headers={"Content-Type": "application/json"})
+        ans = []
+        try:
+            with request.urlopen(req, timeout=120) as resp:
+                while True:
+                    line = resp.readline()
+                    if not line: break
+                    try:
+                        data = json.loads(line.decode(errors="replace"))
+                        chunk = data.get("message", {}).get("content", "")
+                        if chunk: ans.append(chunk); sys.stdout.write(chunk); sys.stdout.flush()
+                        if data.get("done"): break
+                    except: continue
+            print()
+        except error.URLError as e:
+            print_color(f"\n[!] Erro Ollama: O servidor esta rodando? ({e.reason})", Colors.F, file=sys.stderr)
+            print_color(f"Dica: Execute 'ollama serve' ou verifique OLLAMA_HOST={self.host}", Colors.D, file=sys.stderr)
+        except Exception as e:
+            print_color(f"\n[!] Erro API: {e}", Colors.F, file=sys.stderr)
+        return "".join(ans).strip()
+
+def build_project_context(dir_path: str) -> str:
+    path = Path(dir_path).resolve(); fnmatch = get_fnmatch()
+    if not path.is_dir(): return ""
+    
+    # Suporte robusto a .gitignore
+    ignore_patterns = {'.git', 'node_modules', '__pycache__', 'venv', 'dist', 'build', '.kaos_memory.json', '.DS_Store'}
+    git_ignore = path / ".gitignore"
+    if git_ignore.exists():
+        try:
+            for l in git_ignore.read_text().splitlines():
+                l = l.strip()
+                if l and not l.startswith("#"):
+                    # Normaliza padrões simples de gitignore para fnmatch
+                    p = l.rstrip('/')
+                    if p.startswith('/'): p = p[1:]
+                    ignore_patterns.add(p)
+                    if not l.endswith('/'): ignore_patterns.add(p + '/*')
+        except: pass
+
+    context_parts = [f"Project structure of {path.name}:"]
+    processed_files = 0; max_files = 40
+    
+    for root, dirs, files in os.walk(path):
+        rel_root = os.path.relpath(root, path)
+        
+        # Poda de diretórios ignorados
+        if rel_root != ".":
+            should_ignore_dir = False
+            for p in ignore_patterns:
+                if fnmatch.fnmatch(rel_root, p) or rel_root.startswith(p.rstrip('/*')):
+                    should_ignore_dir = True; break
+            if should_ignore_dir: dirs[:] = []; continue
+        
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ignore_patterns]
+        level = 0 if rel_root == "." else rel_root.count(os.sep) + 1
+        if level > 3: continue
+        
+        context_parts.append('    ' * level + os.path.basename(root) + '/')
+        for f in sorted(files):
+            if f.startswith('.') or f in ignore_patterns: continue
+            context_parts.append('    ' * (level + 1) + f)
+            
+    important = {'README.md', 'package.json', 'requirements.txt', 'config.env', 'Dockerfile', 'Makefile', 'setup.py', 'go.mod'}
+    for root, _, files in os.walk(path):
+        rel_root = os.path.relpath(root, path)
+        should_ignore = False
+        for p in ignore_patterns:
+            if fnmatch.fnmatch(rel_root, p) or rel_root.startswith(p.rstrip('/*')):
+                should_ignore = True; break
+        if should_ignore: continue
+        
+        for f in sorted(files):
+            if processed_files >= max_files: break
+            if (f in important or f.endswith(('.py', '.sh', '.js', '.ts', '.rs', '.go', '.sql', '.md'))) and f not in ignore_patterns:
+                filepath = Path(root) / f
+                try:
+                    size = filepath.stat().st_size
+                    if 0 < size < 15000:
+                        context_parts.append(f"\n--- FILE: {os.path.relpath(filepath, path)} ---\n{filepath.read_text(errors='replace')}\n")
+                        processed_files += 1
+                except: pass
+    return "\n".join(context_parts)
+
+def interactive_mode(client, config: AppConfig, session_manager: SessionManager):
+    print_color(f"KAOS v{VERSION} - MODO CHAT", Colors.C)
+    print_color("Dica: Use /help para comandos ou /exit para sair.", Colors.D)
+    current_session = "default"
+    while True:
+        try: p = input(f"\nkaos ({current_session})> ").strip()
+        except (KeyboardInterrupt, EOFError): print(); break
+        if not p: continue
+        if p.startswith("/"):
+            args = p.split(); cmd = args[0].lower()
+            if cmd == "/help": print("Comandos: /help, /clear, /model [nome], /models, /session [nome], /doctor, /exit")
+            elif cmd == "/clear":
+                session_manager.clear_session(current_session)
+                os.system("clear" if os.name == "posix" else "cls")
+                print_color("[*] Memoria e tela limpas.", Colors.G)
+            elif cmd == "/models":
+                models = client.check_models()
+                if models: [print(f" - {m}") for m in models]
+                else: print_color("[!] Nenhum modelo encontrado.", Colors.F)
+            elif cmd == "/model":
+                if len(args) > 1:
+                    config.model = args[1]
+                    print_color(f"[*] Modelo alterado para: {config.model}", Colors.G)
+                else: print(f"Modelo atual: {config.model}")
+            elif cmd == "/session":
+                if len(args) > 1:
+                    current_session = args[1]
+                    print_color(f"[*] Sessao: {current_session}", Colors.G)
+                else: print(f"Sessao atual: {current_session}")
+            elif cmd == "/doctor":
+                print_color(f"Status: OK | Provider: {config.provider} | Model: {config.model}", Colors.G)
+                print(f"Host: {config.host}")
+            elif cmd == "/exit": break
+            else: print_color("[!] Comando desconhecido.", Colors.F)
+            continue
+        
+        history = session_manager.get_messages(current_session)
+        history.insert(0, {"role": "system", "content": config.system})
+        history.append({"role": "user", "content": p})
+        
+        print_color("\n[KAOS]", Colors.B)
+        ans = client.chat_stream(client.resolve_model(config.model), history)
+        if ans:
+            session_manager.add_message(current_session, "user", p)
+            session_manager.add_message(current_session, "assistant", ans)
+
+def main():
+    argparse = get_argparse()
+    parser = argparse.ArgumentParser(prog=APP_NAME, description="KAOS CLI - Terminal IA Assistant")
+    parser.add_argument("prompt", nargs="*", help="Pergunta ou comando para a IA")
+    parser.add_argument("--doctor", action="store_true", help="Verificar saude do sistema")
+    parser.add_argument("--models", action="store_true", help="Listar modelos disponiveis")
+    parser.add_argument("--stdin", action="store_true", help="Ler do stdin (pipe)")
+    parser.add_argument("--read", metavar="FILE", help="Anexar arquivo ao contexto")
+    parser.add_argument("--project", metavar="DIR", help="Anexar contexto do projeto")
+    parser.add_argument("--file", metavar="FILE", help="Ler prompt de um arquivo")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+
+    args = parser.parse_args(); conf = load_config()
+    client = GeminiClient(conf.key) if conf.provider == "gemini" else OllamaClient(conf.host)
+    session_manager = SessionManager()
+
+    if args.doctor:
+        print_color(f"KAOS v{VERSION}", Colors.H)
+        models = client.check_models()
+        status = Colors.G + "OK" if models or conf.provider == "gemini" else Colors.F + "ERRO (Server Offline)"
+        print(f"Status..........: {status}")
+        print(f"Provider........: {conf.provider}")
+        print(f"Modelo Padrao...: {conf.model}")
+        print(f"Ollama Host.....: {conf.host}")
+        return
+
+    if args.models:
+        models = client.check_models()
+        if models: [print(m) for m in models]
+        else: print_color("[!] Erro ao listar modelos.", Colors.F)
+        return
+
+    prompt_text = ""
+    if args.stdin or not sys.stdin.isatty():
+        try: prompt_text = sys.stdin.read().strip()
+        except EOFError: pass
+    elif args.file:
+        try: prompt_text = Path(args.file).read_text(errors='replace').strip()
+        except Exception as e: print_color(f"[!] Erro ao ler arquivo: {e}", Colors.F); return
+        
+    if args.prompt:
+        prompt_text = (" ".join(args.prompt) + "\n\n" + prompt_text).strip()
+
+    if not prompt_text and sys.stdin.isatty():
+        interactive_mode(client, conf, session_manager); return
+
+    full_prompt = prompt_text
+    proj_dir = args.project if args.project else ("." if (conf.auto_context and ("analise" in prompt_text.lower() or "revise" in prompt_text.lower())) else None)
+    
+    if proj_dir:
+        print_color("[*] Contexto ativado...", Colors.D, file=sys.stderr, flush=True)
+        ctx = build_project_context(proj_dir)
+        if ctx: full_prompt += f"\n\n[CONTEXTO DE PROJETO]\n{ctx}"
+        
+    if args.read:
+        try:
+            content = Path(args.read).read_text(errors='replace')
+            full_prompt += f"\n\n[CONTEXTO EXPLICITO]\n--- FILE: {args.read} ---\n{content}"
+        except Exception as e:
+            print_color(f"[!] Erro ao ler contexto: {e}", Colors.F, file=sys.stderr)
+
+    client.chat_stream(client.resolve_model(conf.model), [{"role": "system", "content": conf.system}, {"role": "user", "content": full_prompt}])
+
+if __name__ == "__main__":
+    main()

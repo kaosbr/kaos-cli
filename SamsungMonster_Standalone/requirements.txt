@@ -1,0 +1,11 @@
+PyQt6
+pyusb
+pyserial
+requests
+python-dotenv
+cryptography
+psutil
+qrcode[pil]
+Pillow
+beautifulsoup4
+lz4
