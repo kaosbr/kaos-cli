@@ -16,77 +16,20 @@ def print_color(t, c, end="\n", flush=False, file=sys.stdout):
     file.write(f"{c}{t}{Colors.E}{end}")
     if flush: file.flush()
 
+# --- DYNAMIC PATH SETUP ---
+_app_dir = Path(__file__).resolve().parent
+if (_app_dir / "src" / "db_manager.py").exists():
+    sys.path.insert(0, str(_app_dir / "src"))
+else:
+    sys.path.insert(0, str(Path.home() / ".local" / "share" / "kaos-cli"))
+
 # --- LAZY IMPORTS ---
+def get_db_manager(): import db_manager; return db_manager
 def get_json(): import json; return json
 def get_urllib(): import urllib.request as request, urllib.error as error; return request, error
 def get_sqlite3(): import sqlite3; return sqlite3
 def get_argparse(): import argparse; return argparse
 def get_fnmatch(): import fnmatch; return fnmatch
-
-# --- DATABASE MANAGER (SESSIONS) ---
-class SessionManager:
-    def __init__(self, db_path: str = None):
-        if db_path is None:
-            db_dir = Path.home() / ".local" / "share" / "kaos-cli"
-            db_dir.mkdir(parents=True, exist_ok=True)
-            db_path = db_dir / "sessions.db"
-        self.db_path = str(db_path)
-        self._init_db()
-
-    def _init_db(self):
-        """
-        Inicializa o banco de dados SQLite para armazenar o histórico de mensagens.
-        Cria a tabela 'messages' se ela não existir.
-        """
-        sqlite3 = get_sqlite3()
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                # OTIMIZAÇÃO: O modo WAL (Write-Ahead Logging) melhora significativamente a performance
-                # de leitura e escrita e permite maior concorrência, o que é útil caso o banco seja
-                # acessado por múltiplos processos simultaneamente.
-                # PRAGMA synchronous=NORMAL reduz o número de sincronizações de disco, aumentando a velocidade.
-                cursor.execute('PRAGMA journal_mode=WAL')
-                cursor.execute('PRAGMA synchronous=NORMAL')
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_name TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                conn.commit()
-        except Exception as e:
-            print_color(f"[!] Erro DB: {e}", Colors.F, file=sys.stderr)
-
-    def add_message(self, session_name: str, role: str, content: str):
-        sqlite3 = get_sqlite3()
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO messages (session_name, role, content) VALUES (?, ?, ?)", (session_name, role, content))
-                conn.commit()
-        except: pass
-
-    def get_messages(self, session_name: str):
-        sqlite3 = get_sqlite3()
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT role, content FROM messages WHERE session_name = ? ORDER BY id ASC", (session_name,))
-                return [{"role": row[0], "content": row[1]} for row in cursor.fetchall()]
-        except: return []
-
-    def clear_session(self, session_name: str):
-        sqlite3 = get_sqlite3()
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM messages WHERE session_name = ?", (session_name,))
-                conn.commit()
-        except: pass
 
 # --- CONFIGURAÇÃO ---
 class AppConfig:
@@ -309,7 +252,7 @@ def build_project_context(dir_path: str) -> str:
                 except: pass
     return "\n".join(context_parts)
 
-def interactive_mode(client, config: AppConfig, session_manager: SessionManager):
+def interactive_mode(client, config: AppConfig, session_manager: 'db_manager.SessionManager'):
     print_color(f"KAOS v{VERSION} - MODO CHAT", Colors.C)
     print_color("Dica: Use /help para comandos ou /exit para sair.", Colors.D)
     current_session = "default"
@@ -369,7 +312,7 @@ def main():
 
     args = parser.parse_args(); conf = load_config()
     client = GeminiClient(conf.key) if conf.provider == "gemini" else OllamaClient(conf.host)
-    session_manager = SessionManager()
+    session_manager = get_db_manager().SessionManager()
 
     if args.doctor:
         print_color(f"KAOS v{VERSION}", Colors.H)
