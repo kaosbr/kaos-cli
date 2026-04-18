@@ -17,7 +17,7 @@ install -m 0755 "$SCRIPT_DIR/kaos-cli" "$DATA_DIR/kaos-cli"
 install -m 0644 "$SCRIPT_DIR/README.md" "$DATA_DIR/README.md"
 
 if [ ! -f "$CONFIG_DIR/config.env" ]; then
-  install -m 0644 "$SCRIPT_DIR/config.env.example" "$CONFIG_DIR/config.env"
+  install -m 0600 "$SCRIPT_DIR/config.env.example" "$CONFIG_DIR/config.env"
 fi
 
 "$PYTHON_BIN" -m py_compile "$BIN_PATH"
