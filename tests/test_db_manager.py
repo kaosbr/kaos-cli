@@ -2,6 +2,7 @@ import unittest
 import sqlite3
 import tempfile
 import os
+import io
 from unittest.mock import patch
 from pathlib import Path
 
@@ -33,12 +34,16 @@ class TestSessionManager(unittest.TestCase):
             self.assertIsNotNone(table)
 
     @patch('sqlite3.connect')
-    def test_init_db_failure(self, mock_connect):
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_init_db_failure(self, mock_stderr, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
 
         # Should not raise exception
         manager = SessionManager(os.path.join(self.temp_dir.name, "fail.db"))
         self.assertIsNotNone(manager)
+
+        # Verify stderr output
+        self.assertIn("[!] Error initializing DB: Mocked DB error", mock_stderr.getvalue())
 
     def test_add_and_get_messages_success(self):
         session_name = "test_session"
