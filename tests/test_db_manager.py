@@ -21,6 +21,14 @@ class TestSessionManager(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    @patch('pathlib.Path.home')
+    def test_init_without_db_path(self, mock_home):
+        mock_home.return_value = Path(self.temp_dir.name)
+        manager = SessionManager()
+        expected_path = str(Path(self.temp_dir.name) / ".local" / "share" / "kaos-cli" / "sessions.db")
+        self.assertEqual(manager.db_path, expected_path)
+        self.assertTrue(os.path.exists(expected_path))
+
     def test_init_db_success(self):
         # Database should have been initialized in setUp
         self.assertTrue(os.path.exists(self.db_path))
@@ -87,10 +95,28 @@ class TestSessionManager(unittest.TestCase):
 
     @patch('sqlite3.connect')
     def test_clear_session_failure(self, mock_connect):
+        import sys
+        from io import StringIO
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
 
-        # Should not raise exception
-        self.manager.clear_session("session")
+        captured_stdout = StringIO()
+        captured_stderr = StringIO()
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+
+        sys.stdout = captured_stdout
+        sys.stderr = captured_stderr
+
+        try:
+            # Should not raise exception
+            self.manager.clear_session("session")
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+        # Verify that the exception was absorbed silently without any output
+        self.assertEqual(captured_stdout.getvalue(), "")
+        self.assertEqual(captured_stderr.getvalue(), "")
 
 if __name__ == '__main__':
     unittest.main()
