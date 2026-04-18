@@ -112,5 +112,108 @@ class TestKaosCliCore(unittest.TestCase):
         resolved = client.resolve_model("gemini-1.5-pro")
         self.assertEqual(resolved, "gemini-1.5-pro")
 
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('kaos_cli.Path.home')
+    @patch('kaos_cli.Path.cwd')
+    def test_load_config_defaults(self, mock_cwd, mock_home):
+        mock_home.return_value = Path("/nonexistent/home")
+        mock_cwd.return_value = Path("/nonexistent/cwd")
+
+        config = kaos_cli.load_config()
+        self.assertEqual(config.provider, "ollama")
+        self.assertEqual(config.key, "")
+        self.assertEqual(config.host, "http://127.0.0.1:11434")
+        self.assertEqual(config.model, "qwen2.5-coder:latest")
+        self.assertEqual(config.system, "Você é o KAOS CLI, especialista sênior em engenharia.")
+        self.assertEqual(config.auto_context, True)
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('kaos_cli.Path.home')
+    @patch('kaos_cli.Path.cwd')
+    def test_load_config_env_vars_precedence(self, mock_cwd, mock_home):
+        mock_home.return_value = Path("/nonexistent/home")
+        mock_cwd.return_value = Path("/nonexistent/cwd")
+
+        env_vars = {
+            "KAOS_PROVIDER": "gemini",
+            "GOOGLE_API_KEY": "test_key",
+            "OLLAMA_HOST": "http://other:11434",
+            "KAOS_MODEL": "gemini-1.5-pro",
+            "KAOS_SYSTEM_PROMPT": "New Prompt",
+            "KAOS_AUTO_CONTEXT": "0"
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            config = kaos_cli.load_config()
+            self.assertEqual(config.provider, "gemini")
+            self.assertEqual(config.key, "test_key")
+            self.assertEqual(config.host, "http://other:11434")
+            self.assertEqual(config.model, "gemini-1.5-pro")
+            self.assertEqual(config.system, "New Prompt")
+            self.assertEqual(config.auto_context, False)
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('kaos_cli.Path.home')
+    @patch('kaos_cli.Path.cwd')
+    def test_load_config_file_cwd_precedence(self, mock_cwd, mock_home):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home_dir = Path(temp_dir) / "home"
+            cwd_dir = Path(temp_dir) / "cwd"
+
+            home_config_dir = home_dir / ".config/kaos-cli"
+            home_config_dir.mkdir(parents=True)
+            home_config = home_config_dir / "config.env"
+            home_config.write_text("KAOS_PROVIDER=ollama\nKAOS_MODEL=qwen-home\n")
+
+            cwd_dir.mkdir(parents=True)
+            cwd_config = cwd_dir / "config.env"
+            cwd_config.write_text("KAOS_PROVIDER=gemini\nKAOS_MODEL=gemini-cwd\nGOOGLE_API_KEY=test_key\n")
+
+            mock_home.return_value = home_dir
+            mock_cwd.return_value = cwd_dir
+
+            config = kaos_cli.load_config()
+            self.assertEqual(config.provider, "gemini") # Overridden by cwd
+            self.assertEqual(config.model, "gemini-cwd") # Overridden by cwd
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('kaos_cli.Path.home')
+    @patch('kaos_cli.Path.cwd')
+    def test_load_config_file_parsing_edge_cases(self, mock_cwd, mock_home):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd_dir = Path(temp_dir)
+            cwd_config = cwd_dir / "config.env"
+            cwd_config.write_text(
+                "# This is a comment\n"
+                "MALFORMED LINE\n"
+                "KAOS_PROVIDER=gemini  \n"
+                "GOOGLE_API_KEY=test_key\n"
+                "KAOS_MODEL='gemini-1.5-pro'\n"
+                "KAOS_SYSTEM_PROMPT=\"Quote Prompt\"\n"
+            )
+
+            mock_home.return_value = Path("/nonexistent/home")
+            mock_cwd.return_value = cwd_dir
+
+            config = kaos_cli.load_config()
+            self.assertEqual(config.provider, "gemini") # Trims trailing space
+            self.assertEqual(config.model, "gemini-1.5-pro") # Strips quotes
+            self.assertEqual(config.system, "Quote Prompt") # Strips quotes
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('kaos_cli.Path.home')
+    @patch('kaos_cli.Path.cwd')
+    def test_load_config_gemini_fallback(self, mock_cwd, mock_home):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd_dir = Path(temp_dir)
+            cwd_config = cwd_dir / "config.env"
+            cwd_config.write_text("KAOS_PROVIDER=gemini\nKAOS_MODEL=gemini-cwd\n")
+
+            mock_home.return_value = Path("/nonexistent/home")
+            mock_cwd.return_value = cwd_dir
+
+            config = kaos_cli.load_config()
+            # Missing API key should force fallback to ollama
+            self.assertEqual(config.provider, "ollama")
+
 if __name__ == '__main__':
     unittest.main()
