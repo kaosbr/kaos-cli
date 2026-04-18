@@ -21,6 +21,17 @@ class TestSessionManager(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    @patch('pathlib.Path.home')
+    def test_init_default_db_path(self, mock_home):
+        mock_home.return_value = Path(self.temp_dir.name)
+
+        # Test initialization with db_path=None
+        manager = SessionManager()
+        expected_db_path = Path(self.temp_dir.name) / ".local" / "share" / "kaos-cli" / "sessions.db"
+
+        self.assertEqual(manager.db_path, str(expected_db_path))
+        self.assertTrue(expected_db_path.exists())
+
     def test_init_db_success(self):
         # Database should have been initialized in setUp
         self.assertTrue(os.path.exists(self.db_path))
@@ -39,6 +50,24 @@ class TestSessionManager(unittest.TestCase):
         # Should not raise exception
         manager = SessionManager(os.path.join(self.temp_dir.name, "fail.db"))
         self.assertIsNotNone(manager)
+
+    def test_add_message_direct_db_check(self):
+        session_name = "test_direct_db_check"
+        self.manager.add_message(session_name, "system", "You are a test bot.")
+
+        # Connect directly to the database to verify the insertion
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT session_name, role, content FROM messages WHERE session_name = ?",
+                (session_name,)
+            )
+            rows = cursor.fetchall()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], session_name)
+        self.assertEqual(rows[0][1], "system")
+        self.assertEqual(rows[0][2], "You are a test bot.")
 
     def test_add_and_get_messages_success(self):
         session_name = "test_session"
