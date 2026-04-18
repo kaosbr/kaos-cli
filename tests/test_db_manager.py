@@ -74,16 +74,32 @@ class TestSessionManager(unittest.TestCase):
 
     def test_clear_session_success(self):
         session_name = "test_session"
+        # Add multiple records to verify deletion logic
         self.manager.add_message(session_name, "user", "Hello world")
+        self.manager.add_message(session_name, "assistant", "Hi there")
+        self.manager.add_message(session_name, "user", "Another message")
         self.manager.add_message("other_session", "user", "Don't delete me")
 
+        # Verify records were added
+        messages_before = self.manager.get_messages(session_name)
+        self.assertEqual(len(messages_before), 3)
+
+        self.manager.clear_session(session_name)
+
+        # Verify list is empty
+        messages_after = self.manager.get_messages(session_name)
+        self.assertEqual(len(messages_after), 0)
+
+        other_messages = self.manager.get_messages("other_session")
+        self.assertEqual(len(other_messages), 1)
+
+    def test_clear_session_empty_session(self):
+        session_name = "non_existent_session"
+        # Should not raise exception
         self.manager.clear_session(session_name)
 
         messages = self.manager.get_messages(session_name)
         self.assertEqual(len(messages), 0)
-
-        other_messages = self.manager.get_messages("other_session")
-        self.assertEqual(len(other_messages), 1)
 
     @patch('sqlite3.connect')
     def test_clear_session_failure(self, mock_connect):
