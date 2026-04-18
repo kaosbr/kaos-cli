@@ -64,6 +64,28 @@ class TestSessionManager(unittest.TestCase):
         # Should not raise exception
         self.manager.add_message("session", "user", "test")
 
+    def test_add_message_insertion_failure_readonly_db(self):
+        session_name = "test_session"
+        # Initial message to ensure DB and tables are created
+        self.manager.add_message(session_name, "user", "First message")
+
+        # Make DB file and its directory read-only
+        os.chmod(self.db_path, 0o444)
+        os.chmod(self.temp_dir.name, 0o555)
+
+        try:
+            # Should fail silently
+            self.manager.add_message(session_name, "assistant", "This should fail")
+
+            # Verify the message was NOT added
+            messages = self.manager.get_messages(session_name)
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0]["content"], "First message")
+        finally:
+            # Restore permissions so tearDown() can clean up
+            os.chmod(self.temp_dir.name, 0o755)
+            os.chmod(self.db_path, 0o644)
+
     @patch('sqlite3.connect')
     def test_get_messages_failure(self, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
