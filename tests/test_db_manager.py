@@ -2,7 +2,8 @@ import unittest
 import sqlite3
 import tempfile
 import os
-from unittest.mock import patch
+import io
+from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 import sys
@@ -21,6 +22,14 @@ class TestSessionManager(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    @patch('pathlib.Path.home')
+    def test_init_without_db_path(self, mock_home):
+        mock_home.return_value = Path(self.temp_dir.name)
+        manager = SessionManager()
+        expected_path = str(Path(self.temp_dir.name) / ".local" / "share" / "kaos-cli" / "sessions.db")
+        self.assertEqual(manager.db_path, expected_path)
+        self.assertTrue(os.path.exists(expected_path))
+
     def test_init_db_success(self):
         # Database should have been initialized in setUp
         self.assertTrue(os.path.exists(self.db_path))
@@ -33,11 +42,29 @@ class TestSessionManager(unittest.TestCase):
             self.assertIsNotNone(table)
 
     @patch('sqlite3.connect')
-    def test_init_db_failure(self, mock_connect):
+    @patch('sys.stderr', new_callable=io.StringIO)
+    def test_init_db_failure(self, mock_stderr, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
 
         # Should not raise exception
         manager = SessionManager(os.path.join(self.temp_dir.name, "fail.db"))
+        self.assertIsNotNone(manager)
+
+        # Verify stderr output
+        self.assertIn("[!] Error initializing DB: Mocked DB error", mock_stderr.getvalue())
+
+    @patch('sqlite3.connect')
+    def test_init_db_execution_failure(self, mock_connect):
+        # Configura o mock para retornar uma conexao que falha no execute
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = sqlite3.Error("Execution error")
+        mock_conn.cursor.return_value = mock_cursor
+        mock_connect.return_value = mock_conn
+
+        # Cria um novo manager que vai usar o mock
+        # Deve falhar silenciosamente (ou logar) mas nao levantar excecao
+        manager = SessionManager(os.path.join(self.temp_dir.name, "fail_exec.db"))
         self.assertIsNotNone(manager)
 
     def test_add_and_get_messages_success(self):
@@ -57,9 +84,29 @@ class TestSessionManager(unittest.TestCase):
         messages = self.manager.get_messages("non_existent_session")
         self.assertEqual(len(messages), 0)
 
+    def test_get_messages_with_known_records(self):
+        session_name = "known_records_session"
+        # Setup test db with known records directly via sqlite3 to test get_messages logic
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Insert out of order to ensure get_messages sorts by id ASC
+            cursor.execute("INSERT INTO messages (id, session_name, role, content) VALUES (?, ?, ?, ?)", (2, session_name, "assistant", "Response"))
+            cursor.execute("INSERT INTO messages (id, session_name, role, content) VALUES (?, ?, ?, ?)", (1, session_name, "user", "Hello"))
+            # Insert record for another session to ensure filtering works
+            cursor.execute("INSERT INTO messages (id, session_name, role, content) VALUES (?, ?, ?, ?)", (3, "other_session", "user", "Other"))
+            conn.commit()
+
+        messages = self.manager.get_messages(session_name)
+
+        self.assertEqual(len(messages), 2)
+        # Verify ordering by id ASC
+        self.assertEqual(messages[0], {"role": "user", "content": "Hello"})
+        self.assertEqual(messages[1], {"role": "assistant", "content": "Response"})
+
     @patch('sqlite3.connect')
     def test_add_message_failure(self, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
+        self.manager.conn = None
 
         # Should not raise exception
         self.manager.add_message("session", "user", "test")
@@ -67,6 +114,7 @@ class TestSessionManager(unittest.TestCase):
     @patch('sqlite3.connect')
     def test_get_messages_failure(self, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
+        self.manager.conn = None
 
         # Should return empty list on failure
         messages = self.manager.get_messages("session")
@@ -87,10 +135,29 @@ class TestSessionManager(unittest.TestCase):
 
     @patch('sqlite3.connect')
     def test_clear_session_failure(self, mock_connect):
+        import sys
+        from io import StringIO
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
+        self.manager.conn = None
 
-        # Should not raise exception
-        self.manager.clear_session("session")
+        captured_stdout = StringIO()
+        captured_stderr = StringIO()
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+
+        sys.stdout = captured_stdout
+        sys.stderr = captured_stderr
+
+        try:
+            # Should not raise exception
+            self.manager.clear_session("session")
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+        # Verify that the exception was absorbed silently without any output
+        self.assertEqual(captured_stdout.getvalue(), "")
+        self.assertEqual(captured_stderr.getvalue(), "")
 
 if __name__ == '__main__':
     unittest.main()

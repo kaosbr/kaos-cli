@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 # --- METADADOS ---
-APP_NAME, VERSION = "kaos-cli", "8.1.2-stable"
+APP_NAME, VERSION = "kaos-cli", "8.1.3-stable"
 DEFAULT_HOST, DEFAULT_MODEL = "http://127.0.0.1:11434", "qwen2.5-coder:latest"
 
 class Colors:
