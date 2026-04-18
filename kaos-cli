@@ -322,7 +322,7 @@ def interactive_mode(client, config: AppConfig, session_manager: SessionManager)
             if cmd == "/help": print("Comandos: /help, /clear, /model [nome], /models, /session [nome], /doctor, /exit")
             elif cmd == "/clear":
                 session_manager.clear_session(current_session)
-                os.system("clear" if os.name == "posix" else "cls")
+                print('\033c', end='', flush=True)
                 print_color("[*] Memoria e tela limpas.", Colors.G)
             elif cmd == "/models":
                 models = client.check_models()
