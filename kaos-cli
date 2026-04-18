@@ -61,7 +61,8 @@ class SessionManager:
                 cursor = conn.cursor()
                 cursor.execute("INSERT INTO messages (session_name, role, content) VALUES (?, ?, ?)", (session_name, role, content))
                 conn.commit()
-        except: pass
+        except Exception as e:
+            print_color(f"[!] Erro DB (add_message): {e}", Colors.F, file=sys.stderr)
 
     def get_messages(self, session_name: str):
         sqlite3 = get_sqlite3()
@@ -70,7 +71,9 @@ class SessionManager:
                 cursor = conn.cursor()
                 cursor.execute("SELECT role, content FROM messages WHERE session_name = ? ORDER BY id ASC", (session_name,))
                 return [{"role": row[0], "content": row[1]} for row in cursor.fetchall()]
-        except: return []
+        except Exception as e:
+            print_color(f"[!] Erro DB (get_messages): {e}", Colors.F, file=sys.stderr)
+            return []
 
     def clear_session(self, session_name: str):
         sqlite3 = get_sqlite3()
@@ -79,7 +82,8 @@ class SessionManager:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM messages WHERE session_name = ?", (session_name,))
                 conn.commit()
-        except: pass
+        except Exception as e:
+            print_color(f"[!] Erro DB (clear_session): {e}", Colors.F, file=sys.stderr)
 
 # --- CONFIGURAÇÃO ---
 class AppConfig:
@@ -94,7 +98,8 @@ def load_config() -> AppConfig:
                 for l in c.read_text().splitlines():
                     if "=" in l and not l.startswith("#"):
                         k, v = l.split("=", 1); m[k.strip()] = v.strip().strip("'\"")
-            except: pass
+            except Exception as e:
+                print_color(f"[!] Erro ao ler config {c}: {e}", Colors.F, file=sys.stderr)
     prov = os.environ.get("KAOS_PROVIDER", m.get("KAOS_PROVIDER", "ollama")).lower()
     key = os.environ.get("GOOGLE_API_KEY", m.get("GOOGLE_API_KEY", ""))
     host = os.environ.get("OLLAMA_HOST", m.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
@@ -127,7 +132,9 @@ class GeminiClient:
                         try:
                             data = json.loads(l[6:])
                             chunk = data["candidates"][0]["content"]["parts"][0]["text"]
-                        except: continue
+                        except Exception as e:
+                            print_color(f"[!] Erro ao fazer parse de chunk Gemini: {e}", Colors.F, file=sys.stderr)
+                            continue
                     if chunk:
                         ans.append(chunk); sys.stdout.write(chunk); sys.stdout.flush()
             print()
@@ -145,7 +152,9 @@ class OllamaClient:
             req = request.Request(f"{self.host}/api/tags")
             with request.urlopen(req, timeout=3) as r:
                 return [m["name"] for m in json.loads(r.read()).get("models", [])]
-        except: return []
+        except Exception as e:
+            print_color(f"[!] Erro ao checar modelos no Ollama ({self.host}): {e}", Colors.F, file=sys.stderr)
+            return []
 
     def resolve_model(self, requested: str) -> str:
         models = self.check_models()
@@ -175,7 +184,9 @@ class OllamaClient:
                         chunk = data.get("message", {}).get("content", "")
                         if chunk: ans.append(chunk); sys.stdout.write(chunk); sys.stdout.flush()
                         if data.get("done"): break
-                    except: continue
+                    except Exception as e:
+                        print_color(f"[!] Erro ao ler resposta do Ollama: {e}", Colors.F, file=sys.stderr)
+                        continue
             print()
         except error.URLError as e:
             print_color(f"\n[!] Erro Ollama: O servidor esta rodando? ({e.reason})", Colors.F, file=sys.stderr)
@@ -201,7 +212,8 @@ def build_project_context(dir_path: str) -> str:
                     if p.startswith('/'): p = p[1:]
                     ignore_patterns.add(p)
                     if not l.endswith('/'): ignore_patterns.add(p + '/*')
-        except: pass
+        except Exception as e:
+            print_color(f"[!] Erro ao ler .gitignore: {e}", Colors.F, file=sys.stderr)
 
     context_parts = [f"Project structure of {path.name}:"]
     processed_files = 0; max_files = 40
@@ -244,7 +256,8 @@ def build_project_context(dir_path: str) -> str:
                     if 0 < size < 15000:
                         context_parts.append(f"\n--- FILE: {os.path.relpath(filepath, path)} ---\n{filepath.read_text(errors='replace')}\n")
                         processed_files += 1
-                except: pass
+                except Exception as e:
+                    print_color(f"[!] Erro ao ler arquivo {filepath}: {e}", Colors.F, file=sys.stderr)
     return "\n".join(context_parts)
 
 def interactive_mode(client, config: AppConfig, session_manager: SessionManager):
