@@ -112,7 +112,7 @@ class GeminiClient:
         json = get_json(); request, error = get_urllib()
         cs = [{"role": "user" if msg["role"] in {"user", "system"} else "model", "parts": [{"text": msg["content"]}]} for msg in msgs]
         p = {"contents": cs, "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.2}}
-        req = request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={self.key}", data=json.dumps(p).encode(), headers={"Content-Type": "application/json"})
+        req = request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse", data=json.dumps(p).encode(), headers={"Content-Type": "application/json", "x-goog-api-key": self.key})
         return self._do_stream(req, is_gemini=True)
         
     def _do_stream(self, req, is_gemini):
