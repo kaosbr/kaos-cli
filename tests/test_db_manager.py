@@ -65,8 +65,27 @@ class TestSessionManager(unittest.TestCase):
         self.manager.add_message("session", "user", "test")
 
     @patch('sqlite3.connect')
+    def test_add_message_execute_failure(self, mock_connect):
+        # Mock cursor and its execute method
+        mock_cursor = mock_connect.return_value.__enter__.return_value.cursor.return_value
+        mock_cursor.execute.side_effect = sqlite3.Error("Mocked execute error")
+
+        # Should not raise exception
+        self.manager.add_message("session", "user", "test")
+
+    @patch('sqlite3.connect')
     def test_get_messages_failure(self, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
+
+        # Should return empty list on failure
+        messages = self.manager.get_messages("session")
+        self.assertEqual(messages, [])
+
+    @patch('sqlite3.connect')
+    def test_get_messages_execute_failure(self, mock_connect):
+        # Mock cursor and its execute method
+        mock_cursor = mock_connect.return_value.__enter__.return_value.cursor.return_value
+        mock_cursor.execute.side_effect = sqlite3.Error("Mocked execute error")
 
         # Should return empty list on failure
         messages = self.manager.get_messages("session")
@@ -88,6 +107,15 @@ class TestSessionManager(unittest.TestCase):
     @patch('sqlite3.connect')
     def test_clear_session_failure(self, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
+
+        # Should not raise exception
+        self.manager.clear_session("session")
+
+    @patch('sqlite3.connect')
+    def test_clear_session_execute_failure(self, mock_connect):
+        # Mock cursor and its execute method
+        mock_cursor = mock_connect.return_value.__enter__.return_value.cursor.return_value
+        mock_cursor.execute.side_effect = sqlite3.Error("Mocked execute error")
 
         # Should not raise exception
         self.manager.clear_session("session")
