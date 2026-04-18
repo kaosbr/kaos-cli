@@ -43,7 +43,7 @@ class SessionManager:
                     (session_name, role, content)
                 )
                 conn.commit()
-        except: pass
+        except Exception: pass
 
     def get_messages(self, session_name: str):
         try:
@@ -54,7 +54,7 @@ class SessionManager:
                     (session_name,)
                 )
                 return [{"role": row[0], "content": row[1]} for row in cursor.fetchall()]
-        except: return []
+        except Exception: return []
 
     def clear_session(self, session_name: str):
         try:
@@ -62,4 +62,4 @@ class SessionManager:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM messages WHERE session_name = ?", (session_name,))
                 conn.commit()
-        except: pass
+        except Exception: pass
