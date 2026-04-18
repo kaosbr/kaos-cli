@@ -57,6 +57,25 @@ class TestSessionManager(unittest.TestCase):
         messages = self.manager.get_messages("non_existent_session")
         self.assertEqual(len(messages), 0)
 
+    def test_get_messages_with_known_records(self):
+        session_name = "known_records_session"
+        # Setup test db with known records directly via sqlite3 to test get_messages logic
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Insert out of order to ensure get_messages sorts by id ASC
+            cursor.execute("INSERT INTO messages (id, session_name, role, content) VALUES (?, ?, ?, ?)", (2, session_name, "assistant", "Response"))
+            cursor.execute("INSERT INTO messages (id, session_name, role, content) VALUES (?, ?, ?, ?)", (1, session_name, "user", "Hello"))
+            # Insert record for another session to ensure filtering works
+            cursor.execute("INSERT INTO messages (id, session_name, role, content) VALUES (?, ?, ?, ?)", (3, "other_session", "user", "Other"))
+            conn.commit()
+
+        messages = self.manager.get_messages(session_name)
+
+        self.assertEqual(len(messages), 2)
+        # Verify ordering by id ASC
+        self.assertEqual(messages[0], {"role": "user", "content": "Hello"})
+        self.assertEqual(messages[1], {"role": "assistant", "content": "Response"})
+
     @patch('sqlite3.connect')
     def test_add_message_failure(self, mock_connect):
         mock_connect.side_effect = sqlite3.Error("Mocked DB error")
