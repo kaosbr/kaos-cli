@@ -40,6 +40,14 @@ class TestSessionManager(unittest.TestCase):
         manager = SessionManager(os.path.join(self.temp_dir.name, "fail.db"))
         self.assertIsNotNone(manager)
 
+    @patch('src.db_manager.Path.home')
+    def test_init_default_db_path(self, mock_home):
+        mock_home.return_value = Path(self.temp_dir.name)
+        manager = SessionManager()
+        expected_path = Path(self.temp_dir.name) / ".local" / "share" / "kaos-cli" / "sessions.db"
+        self.assertEqual(manager.db_path, str(expected_path))
+        self.assertTrue(os.path.exists(manager.db_path))
+
     def test_add_and_get_messages_success(self):
         session_name = "test_session"
         self.manager.add_message(session_name, "user", "Hello world")
@@ -56,6 +64,23 @@ class TestSessionManager(unittest.TestCase):
     def test_get_messages_empty_session(self):
         messages = self.manager.get_messages("non_existent_session")
         self.assertEqual(len(messages), 0)
+
+    def test_add_message_inserts_into_db(self):
+        session_name = "direct_db_test"
+        role = "system"
+        content = "You are a helpful assistant."
+
+        self.manager.add_message(session_name, role, content)
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT session_name, role, content FROM messages WHERE session_name = ?", (session_name,))
+            rows = cursor.fetchall()
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0], session_name)
+            self.assertEqual(rows[0][1], role)
+            self.assertEqual(rows[0][2], content)
 
     @patch('sqlite3.connect')
     def test_add_message_failure(self, mock_connect):
